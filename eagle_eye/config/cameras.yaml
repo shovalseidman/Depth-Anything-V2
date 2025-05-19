@@ -1,0 +1,29 @@
+0:
+  input_size: 480
+  models:
+    depth: true
+    det: true
+    pose: true
+    seg: false
+  roi:
+  - 4
+  - 3
+  - 629
+  - 469
+  save_map: true
+  source: /home/shovalseidman/Documents/GitHub/Depth-Anything-V2/eagle_eye/vid5.mp4
+camera_1:
+  input_size: 480
+  models:
+    depth: true
+    det: true
+    pose: false
+    seg: true
+  roi:
+  - 391
+  - 177
+  - 583
+  - 323
+  save_map: false
+  source: 2
+depth_encoder: vitb

@@ -1,0 +1,115 @@
+import cv2
+import matplotlib
+import numpy as np
+import os
+import torch
+
+from ultralytics import YOLO
+from depth_anything_v2.dpt import DepthAnythingV2
+
+# ---- Settings ----
+input_size = 480
+outdir = './output'
+encoder = 'vitb'
+grayscale = False
+
+DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+
+# ---- Load Models ----
+model_configs = {
+    'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+    'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+    'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+    'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
+}
+depth_anything = DepthAnythingV2(**model_configs[encoder])
+depth_anything.load_state_dict(torch.load(f'checkpoints/depth_anything_v2_{encoder}.pth', map_location='cpu'))
+depth_anything = depth_anything.to(DEVICE).eval()
+
+# ---- YOLO Models ----
+yolo_model_pose = YOLO("yolo11x-pose.pt").to(DEVICE)
+yolo_model_det = YOLO("yolo11x.pt").to(DEVICE)
+yolo_model_seg = YOLO("yolo11x-seg.pt").to(DEVICE)
+
+cmap = matplotlib.colormaps.get_cmap('Spectral_r')
+
+# ---- Open Cameras ----
+cap1 = cv2.VideoCapture(2)
+cap2 = cv2.VideoCapture(0)
+os.makedirs(outdir, exist_ok=True)
+
+while True:
+    ret1, frame1 = cap1.read()
+    ret2, frame2 = cap2.read()
+    if not ret1 or not ret2:
+        break
+
+    ### ---------- Process Camera 1 ----------
+    pose1 = yolo_model_pose(frame1)[0].plot()
+    det1 = yolo_model_det(frame1)[0].plot()
+    seg1 = yolo_model_seg(frame1)[0].plot()
+    with torch.no_grad():
+        depth1 = depth_anything.infer_image(frame1, input_size)
+    depth1 = (depth1 - depth1.min()) / (depth1.max() - depth1.min()) * 255.0
+    depth1 = depth1.astype(np.uint8)
+    depth1_color = (cmap(depth1)[:, :, :3] * 255)[:, :, ::-1].astype(np.uint8) if not grayscale else np.repeat(depth1[..., np.newaxis], 3, axis=-1)
+
+    # Create 2D map from depth1
+    depth1_norm = (depth1 - depth1.min()) / (depth1.max() - depth1.min())
+    obstacle_mask1 = (depth1_norm < 0.4).astype(np.uint8)
+    topview1 = np.max(obstacle_mask1, axis=0)
+    map_img1 = np.zeros((100, topview1.shape[0]), dtype=np.uint8)
+    for x, v in enumerate(topview1):
+        if v > 0:
+            map_img1[-10:, x] = 255
+    map_display1 = cv2.cvtColor(map_img1, cv2.COLOR_GRAY2BGR)
+    map_display1 = cv2.resize(map_display1, (depth1_color.shape[1], depth1_color.shape[0]))
+
+    ### ---------- Process Camera 2 ----------
+    pose2 = yolo_model_pose(frame2)[0].plot()
+    det2 = yolo_model_det(frame2)[0].plot()
+    seg2 = yolo_model_seg(frame2)[0].plot()
+    with torch.no_grad():
+        depth2 = depth_anything.infer_image(frame2, input_size)
+    depth2 = (depth2 - depth2.min()) / (depth2.max() - depth2.min()) * 255.0
+    depth2 = depth2.astype(np.uint8)
+    depth2_color = (cmap(depth2)[:, :, :3] * 255)[:, :, ::-1].astype(np.uint8) if not grayscale else np.repeat(depth2[..., np.newaxis], 3, axis=-1)
+
+    # Create 2D map from depth2
+    depth2_norm = (depth2 - depth2.min()) / (depth2.max() - depth2.min())
+    obstacle_mask2 = (depth2_norm < 0.4).astype(np.uint8)
+    topview2 = np.max(obstacle_mask2, axis=0)
+    map_img2 = np.zeros((100, topview2.shape[0]), dtype=np.uint8)
+    for x, v in enumerate(topview2):
+        if v > 0:
+            map_img2[-10:, x] = 255
+    map_display2 = cv2.cvtColor(map_img2, cv2.COLOR_GRAY2BGR)
+    map_display2 = cv2.resize(map_display2, (depth2_color.shape[1], depth2_color.shape[0]))
+
+    ### ---------- Resize All ----------
+    target_height = 360
+    def resize(img): return cv2.resize(img, (int(img.shape[1] * target_height / img.shape[0]), target_height))
+
+    f1 = resize(frame1); f2 = resize(frame2)
+    p1 = resize(pose1);  p2 = resize(pose2)
+    d1 = resize(det1);   d2 = resize(det2)
+    s1 = resize(seg1);   s2 = resize(seg2)
+    dp1 = resize(depth1_color); dp2 = resize(depth2_color)
+    m1 = resize(map_display1);  m2 = resize(map_display2)
+
+    ### ---------- Create Grid ----------
+    row1 = cv2.hconcat([f1, p1, f2, p2])
+    row2 = cv2.hconcat([d1, s1, d2, s2])
+    row3 = cv2.hconcat([dp1, m1, dp2, m2])
+
+    final_display = cv2.vconcat([row1, row2, row3])
+
+    ### ---------- Display ----------
+    cv2.imshow("YOLO Pose | Object | Seg | Depth + Map | Dual Camera", final_display)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap1.release()
+cap2.release()
+cv2.destroyAllWindows()
